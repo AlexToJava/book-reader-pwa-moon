@@ -353,6 +353,74 @@ video {
   background: var(--color-primary-light);
 }
 
+/* ---- 云端识别设置面板 ---- */
+.panel-desc {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.cloud-key-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 10px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text, #1f2937);
+}
+
+.cloud-key-label input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 15px;
+  border: 1px solid var(--color-border, #d1d5db);
+  border-radius: 12px;
+  background: var(--color-surface, #fff);
+  color: var(--color-text, #1f2937);
+  box-sizing: border-box;
+}
+
+.cloud-key-label input:focus {
+  outline: none;
+  border-color: var(--color-primary, #4f46e5);
+  box-shadow: 0 0 0 3px var(--color-primary-light, rgba(79, 70, 229, 0.15));
+}
+
+.cloud-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.cloud-link {
+  font-size: 13px;
+  color: var(--color-primary-text, #4f46e5);
+  text-decoration: none;
+}
+
+.cloud-link:hover {
+  text-decoration: underline;
+}
+
+.cloud-status {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--color-text-secondary, #6b7280);
+}
+
+.cloud-status.active {
+  color: #16a34a;
+  font-weight: 600;
+}
+
+.cloud-status.warn {
+  color: #d97706;
+  font-weight: 600;
+}
+
 textarea {
   width: 100%;
   min-height: 180px;

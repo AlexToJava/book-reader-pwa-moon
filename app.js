@@ -26,7 +26,33 @@ const DOM = {
   toast: document.querySelector('#toast'),
   toastMsg: document.querySelector('#toastMsg'),
   offlineBanner: document.querySelector('#offlineBanner'),
+  cloudOcrToggle: document.querySelector('#cloudOcrToggle'),
+  cloudApiKey: document.querySelector('#cloudApiKey'),
+  cloudSaveBtn: document.querySelector('#cloudSaveBtn'),
+  cloudStatus: document.querySelector('#cloudStatus'),
 };
+
+// ---- 云端 OCR 设置（OCR.space 免费版，原生支持浏览器跨域）----
+const SETTINGS_KEY = 'bpr_settings_v1';
+let settings = (() => {
+  try {
+    return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || {};
+  } catch (e) {
+    return {};
+  }
+})();
+settings.useCloudOcr = !!settings.useCloudOcr;
+settings.apiKey = settings.apiKey || '';
+function saveSettings() {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      useCloudOcr: settings.useCloudOcr,
+      apiKey: settings.apiKey,
+    }));
+  } catch (e) {
+    console.warn('保存设置失败：', e);
+  }
+}
 
 // ---- 状态 ----
 let stream = null;
@@ -650,7 +676,49 @@ function filterChineseOnly(text) {
 }
 
 // ---- OCR 识别（仅中文，带重试） ----
-async function recognizeImage(source, retryCount = 0) {
+// ---- 云端 OCR（OCR.space 免费版）：浏览器直连，原生支持 CORS ----
+// 免费额度每月 2.5 万次，支持中文（language=chs），返回 ParsedResults[0].ParsedText。
+async function recognizeWithCloud(canvas) {
+  const apiKey = settings.apiKey;
+  if (!apiKey) throw new Error('未配置云端 OCR 密钥');
+
+  const base64 = canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
+  const fd = new FormData();
+  fd.append('apikey', apiKey);
+  fd.append('base64Image', 'data:image/jpeg;base64,' + base64);
+  fd.append('language', 'chs');
+  fd.append('isOverlayRequired', 'false');
+  fd.append('scale', 'true');
+  fd.append('OCREngine', '1'); // 免费版用引擎 1（引擎 2 为付费）
+  fd.append('filetype', 'JPG');
+
+  updateStage(2, '上传图片至云端（识别中）…', 35);
+  const res = await fetch('https://api.ocr.space/parse/image', {
+    method: 'POST',
+    body: fd,
+  });
+  if (!res.ok) {
+    throw new Error('云端 OCR 请求失败（HTTP ' + res.status + '）');
+  }
+  const data = await res.json();
+  if (data.IsErroredOnProcessing) {
+    throw new Error((data.ErrorMessage && data.ErrorMessage[0]) || '云端 OCR 处理失败');
+  }
+  updateStage(3, '云端识别完成，整理文字…', 88);
+  return (data.ParsedResults && data.ParsedResults[0] && data.ParsedResults[0].ParsedText) || '';
+}
+
+// ---- 统一收尾：写入结果、更新状态、可选朗读 ----
+function finishRecognition(text, statusLabel) {
+  DOM.recognizedText.value = text;
+  setStatus(statusLabel, 'active');
+  DOM.progressBar.style.width = '100%';
+  DOM.progressText.textContent = `${statusLabel}（共 ${text.replace(/\s/g, '').length} 字）`;
+  updateSpeechButtons();
+  if (DOM.autoSpeakToggle.checked) speakText();
+}
+
+async function recognizeImage(source, retryCount = 0, forceLocal = false) {
   if (isRecognizing) return;
   if (!window.Tesseract) {
     toast('文字识别组件加载失败，请检查网络后刷新页面');
@@ -669,6 +737,24 @@ async function recognizeImage(source, retryCount = 0) {
   try {
     // 预处理图片以提高 OCR 准确率（灰度→去噪→二值化→断笔修复）
     const processed = await preprocessImage(source);
+
+    // 优先使用云端 OCR（更准），失败或关闭时回退本地 Tesseract
+    const useCloud = !forceLocal && settings.useCloudOcr && settings.apiKey;
+    if (useCloud) {
+      try {
+        const rawText = await recognizeWithCloud(processed);
+        const text = filterChineseOnly(rawText);
+        if (text) {
+          finishRecognition(text, '云端识别完成');
+          return;
+        }
+        toast('云端未识别到中文，改用本地引擎');
+      } catch (e) {
+        console.warn('云端识别失败，回退本地引擎：', e);
+        toast('云端识别失败，正在使用本地引擎');
+      }
+    }
+
     updateStage(
       2,
       '加载识别引擎' + (ocrReady ? '' : '（首次需下载中文语言包，请稍候）'),
@@ -719,21 +805,15 @@ async function recognizeImage(source, retryCount = 0) {
     let text = filterChineseOnly(rawText);
 
     if (!text) {
-      // 过滤后为空，尝试重试一次（可能是图片模糊）
+      // 过滤后为空，尝试重试一次（可能是图片模糊）；重试仅用本地引擎避免反复走云端
       if (retryCount < MAX_RETRIES) {
         DOM.progressText.textContent = '未识别到中文，正在重试…';
-        return recognizeImage(processed, retryCount + 1);
+        return recognizeImage(processed, retryCount + 1, true);
       }
       throw new Error('没有识别到中文汉字，请尝试调整光线或角度后重新拍摄');
     }
 
-    DOM.recognizedText.value = text;
-    setStatus('识别完成', 'active');
-    DOM.progressBar.style.width = '100%';
-    DOM.progressText.textContent = `识别完成（共 ${text.replace(/\s/g, '').length} 字）`;
-    updateSpeechButtons();
-
-    if (DOM.autoSpeakToggle.checked) speakText();
+    finishRecognition(text, '识别完成');
   } catch (error) {
     console.error('识别错误:', error);
     setStatus('识别失败', 'error');
@@ -899,6 +979,41 @@ DOM.imageInput.addEventListener('change', (event) => {
   event.target.value = '';
 });
 
+// ---- 云端 OCR 设置面板 ----
+function updateCloudStatus() {
+  const el = DOM.cloudStatus;
+  if (settings.useCloudOcr && settings.apiKey) {
+    el.textContent = '云端识别：已启用（OCR.space 免费额度）';
+    el.className = 'cloud-status active';
+  } else if (settings.useCloudOcr && !settings.apiKey) {
+    el.textContent = '已开启云端识别，但还没有填写 API Key';
+    el.className = 'cloud-status warn';
+  } else {
+    el.textContent = '云端识别：未启用（使用本地引擎）';
+    el.className = 'cloud-status';
+  }
+}
+function initCloudSettingsUI() {
+  DOM.cloudOcrToggle.checked = settings.useCloudOcr;
+  DOM.cloudApiKey.value = settings.apiKey;
+  updateCloudStatus();
+}
+DOM.cloudOcrToggle.addEventListener('change', () => {
+  settings.useCloudOcr = DOM.cloudOcrToggle.checked;
+  updateCloudStatus();
+});
+DOM.cloudApiKey.addEventListener('input', () => {
+  settings.apiKey = DOM.cloudApiKey.value.trim();
+  updateCloudStatus();
+});
+DOM.cloudSaveBtn.addEventListener('click', () => {
+  settings.useCloudOcr = DOM.cloudOcrToggle.checked;
+  settings.apiKey = DOM.cloudApiKey.value.trim();
+  saveSettings();
+  updateCloudStatus();
+  toast(settings.useCloudOcr && settings.apiKey ? '已保存，下次拍照将使用云端识别' : '已保存');
+});
+
 // 朗读控制
 DOM.speakBtn.addEventListener('click', speakText);
 
@@ -1005,4 +1120,5 @@ if (!navigator.onLine && DOM.offlineBanner) {
 }
 
 // 初始化
+initCloudSettingsUI();
 updateSpeechButtons();

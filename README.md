@@ -39,7 +39,7 @@ http://localhost:8080
 ## 技术说明
 
 - 摄像头：`navigator.mediaDevices.getUserMedia`
-- OCR：Tesseract.js 5（CDN：jsDelivr 主源 + unpkg 回退）
+- OCR：**云端优先** OCR.space（免费版，原生支持浏览器跨域）+ 本地兜底 Tesseract.js 5（CDN：jsDelivr 主源 + unpkg 回退）
 - 朗读：Web Speech API / `speechSynthesis`
 - PWA：Manifest + Service Worker（分层缓存，语言包可被离线缓存）
 
@@ -65,6 +65,14 @@ http://localhost:8080
    首次拍照即可直接识别，无需现场等待下载。
 6. **三阶段进度提示**：`步骤 1/3 预处理 → 步骤 2/3 加载/下载引擎 → 步骤 3/3 识别文字`，
    进度条映射到各阶段合理区间，并实时显示语言包下载百分比，避免「一直没动静」的错觉。
+7. **云端 OCR（免费·更准）**：可选接入 OCR.space 免费云端 OCR，准确率接近豆包等商业方案，
+   每月 2.5 万次免费额度、原生支持浏览器跨域（无需自建后端）。在「云端识别」面板填入免费 API Key 并开启开关即可；
+   云端失败时自动回退本地 Tesseract，无 Key 或未开启时纯本地运行。
+
+   - 免费申请地址：<https://ocr.space/ocrapi>（注册后在 Dashboard 获取 API Key）
+   - 仅识别中文（`language=chs`），其余流程与本地一致。
+   - **密钥安全说明**：API Key 仅保存在本机 `localStorage`，不会上传到除 OCR.space 之外的任何服务器；
+     由于是纯前端 PWA，密钥会出现在客户端代码中，请仅用于个人使用，必要时定期轮换。
 
 ## 当前限制
 
