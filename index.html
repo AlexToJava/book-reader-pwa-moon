@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="拍书朗读" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="stylesheet" href="styles.css" />
+  <title>拍书朗读</title>
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">iPhone H5 / PWA</p>
+        <h1>拍书朗读</h1>
+      </div>
+      <span id="statusBadge" class="badge">未启动</span>
+    </header>
+
+    <section class="camera-card">
+      <div class="camera-frame">
+        <video id="camera" playsinline muted></video>
+        <canvas id="captureCanvas" hidden></canvas>
+        <div class="scan-guide" aria-hidden="true"></div>
+        <p id="cameraHint" class="camera-hint">点击“打开摄像头”，将书页放入框内</p>
+      </div>
+
+      <div class="controls primary-controls">
+        <button id="openCameraBtn" class="btn btn-primary">打开摄像头</button>
+        <button id="captureBtn" class="btn" disabled>拍照识别并朗读</button>
+      </div>
+
+      <label class="upload-label">
+        或从相册选择图片
+        <input id="imageInput" type="file" accept="image/*" capture="environment" />
+      </label>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title-row">
+        <h2>识别结果</h2>
+        <button id="clearBtn" class="text-btn">清空</button>
+      </div>
+      <textarea id="recognizedText" placeholder="识别出来的文字会显示在这里，也可以手动修改。"></textarea>
+      <div id="progressWrap" class="progress-wrap" hidden>
+        <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+        <span id="progressText">正在识别 0%</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>朗读控制</h2>
+      <div class="controls">
+        <button id="speakBtn" class="btn btn-primary" disabled>开始朗读</button>
+        <button id="pauseBtn" class="btn" disabled>暂停</button>
+        <button id="resumeBtn" class="btn" disabled>继续</button>
+        <button id="stopBtn" class="btn" disabled>停止</button>
+      </div>
+
+      <div class="settings-grid">
+        <label>
+          语速 <span id="rateValue">1.0</span>
+          <input id="rateInput" type="range" min="0.6" max="1.6" step="0.1" value="1.0" />
+        </label>
+        <label>
+          语言
+          <select id="languageSelect">
+            <option value="chi_sim">简体中文</option>
+            <option value="eng">英文</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="switch-row">
+        <input id="autoSpeakToggle" type="checkbox" checked />
+        <span>识别完成后自动朗读</span>
+      </label>
+    </section>
+
+    <section class="tips">
+      <h2>拍摄建议</h2>
+      <p>保持书页平整、光线均匀、镜头与书页平行。首次识别需要加载文字识别组件，速度会稍慢。</p>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

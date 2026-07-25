@@ -1,0 +1,18 @@
+{
+  "name": "拍书朗读",
+  "short_name": "拍书朗读",
+  "description": "拍摄书本页面，识别文字并自动朗读",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f3f4f6",
+  "theme_color": "#111827",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
