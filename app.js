@@ -72,8 +72,13 @@ function updateSpeechButtons() {
   DOM.stopBtn.disabled = !speechSynthesis.speaking && !speechSynthesis.paused;
 }
 
-// ---- 图片预处理：灰度 → 高斯去噪 → Otsu 二值化 → 断笔修复 ----
-// 这套管线对笔画密集的中文识别率提升明显
+// ---- 图片预处理：透视矫正 → 光照归一化 → 自适应二值化 → 断笔修复 ----
+// 参考「拍照识字」类 App（豆包 / 扫描全能王）的预处理思路：
+// 1) 自动裁边 + 透视矫正：书页照片几乎都有梯形/倾斜畸变，是拍书识别率低的首要原因
+// 2) 阴影/光照归一化：消除书脊阴影、不均匀打光（全局 Otsu 在阴影下会失效）
+// 3) Sauvola 自适应二值化：对不均匀光照比全局 Otsu 鲁棒得多
+// 4) 去噪 + 断笔修复 + 适度超分（保证小字号 DPI）
+// 透视矫正带严格校验：检测不到清晰四边形就跳过，绝不会把图「矫正坏」
 function preprocessImage(source) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -98,35 +103,65 @@ function preprocessImage(source) {
         DOM.canvas.height = h;
         const ctx = DOM.canvas.getContext('2d', { willReadFrequently: true });
         ctx.drawImage(img, 0, 0, w, h);
-
         const imageData = ctx.getImageData(0, 0, w, h);
         const data = imageData.data;
         const n = w * h;
 
-        // 1) 转灰度
-        const gray = new Float32Array(n);
+        // 1) 转灰度（供后续处理）
+        const gray0 = new Float32Array(n);
         for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-          gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          gray0[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
         }
 
-        // 2) 高斯模糊去噪（让文字边缘干净）
-        const blurred = gaussianBlur(gray, w, h);
+        // 2) 透视矫正（自动裁边 + 拉平书页）
+        let cw = w, ch = h, cdata = data;
+        const quad = detectDocumentQuad(gray0, w, h);
+        if (quad) {
+          const tw = Math.max(
+            2,
+            Math.round((dist(quad[0], quad[1]) + dist(quad[3], quad[2])) / 2)
+          );
+          const th = Math.max(
+            2,
+            Math.round((dist(quad[0], quad[3]) + dist(quad[1], quad[2])) / 2)
+          );
+          const warped = warpImageData(data, w, h, quad, tw, th);
+          if (warped) {
+            cw = tw;
+            ch = th;
+            cdata = warped;
+          }
+        }
 
-        // 3) Otsu 自动阈值二值化
-        const t = otsuThreshold(blurred, n);
+        // 3) 用矫正后的图重新取灰度
+        const gray = new Float32Array(cw * ch);
+        for (let p = 0; p < cw * ch; p++) {
+          gray[p] =
+            0.299 * cdata[p * 4] + 0.587 * cdata[p * 4 + 1] + 0.114 * cdata[p * 4 + 2];
+        }
 
-        // 4) 二值化 + 轻微膨胀，连接断笔
-        const bin = new Uint8Array(n);
-        for (let p = 0; p < n; p++) bin[p] = blurred[p] > t ? 1 : 0;
-        dilate(bin, w, h, 1);
+        // 4) 光照/阴影归一化（消除书脊阴影、渐变打光）
+        illuminationNormalize(gray, cw, ch);
+
+        // 5) 轻微高斯去噪，让文字边缘干净
+        const denoised = gaussianBlur(gray, cw, ch);
+
+        // 6) Sauvola 自适应二值化（比全局 Otsu 更抗不均匀光照）
+        const bin = sauovolaBinarize(denoised, cw, ch, 15, 0.34, 128);
+
+        // 7) 膨胀连接断笔
+        dilate(bin, cw, ch, 1);
 
         // 写回：黑字白底（Tesseract 偏好）
-        for (let p = 0; p < n; p++) {
+        const out = new Uint8ClampedArray(cw * ch * 4);
+        for (let p = 0; p < cw * ch; p++) {
           const v = bin[p] ? 0 : 255;
-          data[p * 4] = data[p * 4 + 1] = data[p * 4 + 2] = v;
-          data[p * 4 + 3] = 255;
+          out[p * 4] = out[p * 4 + 1] = out[p * 4 + 2] = v;
+          out[p * 4 + 3] = 255;
         }
-        ctx.putImageData(imageData, 0, 0);
+        DOM.canvas.width = cw;
+        DOM.canvas.height = ch;
+        ctx.putImageData(new ImageData(out, cw, ch), 0, 0);
         resolve(DOM.canvas);
       } catch (err) {
         reject(err);
@@ -144,7 +179,289 @@ function preprocessImage(source) {
   });
 }
 
-// 3x3 可分离高斯模糊（用于去噪）
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+// 在缩小灰度图上检测书页四边形，返回 [{x,y}x4]（顺序 TL,TR,BR,BL，原图坐标），失败返回 null
+function detectDocumentQuad(gray, w, h) {
+  // 缩小到最长边 <= 480 以加速检测
+  const maxSide = 480;
+  const f = Math.min(1, maxSide / Math.max(w, h));
+  const sw = Math.max(2, Math.round(w * f));
+  const sh = Math.max(2, Math.round(h * f));
+  const small = new Float32Array(sw * sh);
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      small[y * sw + x] = gray[Math.round(y / f) * w + Math.round(x / f)];
+    }
+  }
+  // 边缘：模糊 + Sobel 幅值
+  const blurred = gaussianBlur(small, sw, sh);
+  const mag = new Float32Array(sw * sh);
+  let maxM = 0;
+  for (let y = 1; y < sh - 1; y++) {
+    for (let x = 1; x < sw - 1; x++) {
+      const gx = blurred[y * sw + (x + 1)] - blurred[y * sw + (x - 1)];
+      const gy = blurred[(y + 1) * sw + x] - blurred[(y - 1) * sw + x];
+      const m = Math.hypot(gx, gy);
+      mag[y * sw + x] = m;
+      if (m > maxM) maxM = m;
+    }
+  }
+  const edge = new Uint8Array(sw * sh);
+  const tEdge = maxM * 0.22;
+  for (let i = 0; i < sw * sh; i++) edge[i] = mag[i] > tEdge ? 1 : 0;
+
+  const lines = houghLines(edge, sw, sh);
+  if (lines.length < 4) return null;
+  const quad = selectBoundary(lines, sw, sh);
+  if (!quad) return null;
+  // 还原到原图坐标
+  return quad.map((p) => ({ x: p.x / f, y: p.y / f }));
+}
+
+// 标准霍夫变换检测直线，返回 {t, rho, votes} 列表（按票数降序，截断前若干）
+function houghLines(edge, w, h) {
+  const step = Math.PI / 90; // 2°
+  const thetas = [];
+  for (let t = 0; t < Math.PI; t += step) thetas.push(t);
+  const diag = Math.ceil(Math.hypot(w, h));
+  const numRho = diag * 2 + 1;
+  const acc = new Float32Array(thetas.length * numRho);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!edge[y * w + x]) continue;
+      for (let ti = 0; ti < thetas.length; ti++) {
+        const t = thetas[ti];
+        const rho = Math.round(x * Math.cos(t) + y * Math.sin(t)) + diag;
+        if (rho < 0 || rho >= numRho) continue;
+        acc[ti * numRho + rho] += 1;
+      }
+    }
+  }
+  const thresh = Math.max(6, w * 0.12);
+  const lines = [];
+  for (let ti = 0; ti < thetas.length; ti++) {
+    for (let ri = 0; ri < numRho; ri++) {
+      const v = acc[ti * numRho + ri];
+      if (v >= thresh) lines.push({ t: thetas[ti], rho: ri - diag, votes: v });
+    }
+  }
+  lines.sort((a, b) => b.votes - a.votes);
+  return lines.slice(0, 40);
+}
+
+// 从候选直线中选出 上下左右 四条边界，求交点得到四角；带严格校验
+function selectBoundary(lines, w, h) {
+  const vert = [];
+  const horiz = [];
+  for (const ln of lines) {
+    if (ln.t < 0.25 || ln.t > Math.PI - 0.25) vert.push(ln); // 近垂直
+    else if (Math.abs(ln.t - Math.PI / 2) < 0.25) horiz.push(ln); // 近水平
+  }
+  if (vert.length < 2 || horiz.length < 2) return null;
+  const xAtMid = (ln) => (ln.rho - (h / 2) * Math.sin(ln.t)) / Math.cos(ln.t);
+  const yAtMid = (ln) => (ln.rho - (w / 2) * Math.cos(ln.t)) / Math.sin(ln.t);
+  vert.sort((a, b) => xAtMid(a) - xAtMid(b));
+  horiz.sort((a, b) => yAtMid(a) - yAtMid(b));
+  const left = vert[0];
+  const right = vert[vert.length - 1];
+  const top = horiz[0];
+  const bottom = horiz[horiz.length - 1];
+  const inter = (l1, l2) => {
+    const a1 = Math.cos(l1.t), b1 = Math.sin(l1.t), c1 = -l1.rho;
+    const a2 = Math.cos(l2.t), b2 = Math.sin(l2.t), c2 = -l2.rho;
+    const det = a1 * b2 - a2 * b1;
+    if (Math.abs(det) < 1e-6) return null;
+    return { x: (b1 * c2 - b2 * c1) / det, y: (a2 * c1 - a1 * c2) / det };
+  };
+  const TL = inter(left, top);
+  const TR = inter(right, top);
+  const BR = inter(right, bottom);
+  const BL = inter(left, bottom);
+  if (!TL || !TR || !BR || !BL) return null;
+  const m = 6;
+  const inB = (p) => p.x >= m && p.x <= w - m && p.y >= m && p.y <= h - m;
+  if (!(inB(TL) && inB(TR) && inB(BR) && inB(BL))) return null;
+  // 面积至少占画面 30%，且角点顺序合理
+  const area = Math.abs((TR.x - TL.x) * (BL.y - TL.y) - (BL.x - TL.x) * (TR.y - TL.y));
+  if (area < 0.3 * w * h) return null;
+  if (!(TL.x < TR.x && BL.x < BR.x && TL.y < BL.y && TR.y < BR.y)) return null;
+  return [TL, TR, BR, BL];
+}
+
+// 单应变换：把源四边形（TL,TR,BR,BL）矫正为目标矩形，双线性采样
+function warpImageData(srcData, sw, sh, quad, outW, outH) {
+  const dst = [
+    { x: 0, y: 0 },
+    { x: outW - 1, y: 0 },
+    { x: outW - 1, y: outH - 1 },
+    { x: 0, y: outH - 1 },
+  ];
+  const H = computeHomography(dst, quad); // dst -> src
+  if (!H) return null;
+  const [a, b, c, d, e, f, g, hh] = H;
+  const out = new Uint8ClampedArray(outW * outH * 4);
+  for (let y = 0; y < outH; y++) {
+    for (let x = 0; x < outW; x++) {
+      const den = g * x + hh * y + 1;
+      const sx = (a * x + b * y + c) / den;
+      const sy = (d * x + e * y + f) / den;
+      const o = (y * outW + x) * 4;
+      if (sx < 0 || sx > sw - 1 || sy < 0 || sy > sh - 1) {
+        out[o] = out[o + 1] = out[o + 2] = 255;
+        out[o + 3] = 255;
+        continue;
+      }
+      let x0 = Math.floor(sx), y0 = Math.floor(sy);
+      let x1 = x0 + 1, y1 = y0 + 1;
+      if (x1 > sw - 1) x1 = sw - 1;
+      if (y1 > sh - 1) y1 = sh - 1;
+      const fx = sx - x0, fy = sy - y0;
+      for (let k = 0; k < 4; k++) {
+        const v00 = srcData[(y0 * sw + x0) * 4 + k];
+        const v10 = srcData[(y0 * sw + x1) * 4 + k];
+        const v01 = srcData[(y1 * sw + x0) * 4 + k];
+        const v11 = srcData[(y1 * sw + x1) * 4 + k];
+        const top = v00 + (v10 - v00) * fx;
+        const bot = v01 + (v11 - v01) * fx;
+        out[o + k] = top + (bot - top) * fy;
+      }
+      out[o + 3] = 255;
+    }
+  }
+  return out;
+}
+
+// DLT 解 8 参数单应矩阵 H（目标 4 点 -> 源 4 点）
+function computeHomography(dst, src) {
+  const A = [];
+  const B = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = [dst[i].x, dst[i].y];
+    const [u, v] = [src[i].x, src[i].y];
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]);
+    B.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]);
+    B.push(v);
+  }
+  return solve8x8(A, B);
+}
+
+function solve8x8(A, b) {
+  const n = 8;
+  const M = [];
+  for (let i = 0; i < n; i++) {
+    M[i] = A[i].slice();
+    M[i].push(b[i]);
+  }
+  for (let col = 0; col < n; col++) {
+    let piv = -1;
+    for (let r = col; r < n; r++) {
+      if (Math.abs(M[r][col]) > 1e-9) {
+        piv = r;
+        break;
+      }
+    }
+    if (piv < 0) return null;
+    [M[col], M[piv]] = [M[piv], M[col]];
+    const dv = M[col][col];
+    for (let j = col; j <= n; j++) M[col][j] /= dv;
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const fv = M[r][col];
+      if (fv === 0) continue;
+      for (let j = col; j <= n; j++) M[r][j] -= fv * M[col][j];
+    }
+  }
+  return M.map((row) => row[n]);
+}
+
+// 光照/阴影归一化：估计低频光照 L，用 gray / L 抵消阴影与渐变打光
+function illuminationNormalize(gray, w, h) {
+  const f = 8;
+  const sw = Math.max(1, Math.round(w / f));
+  const sh = Math.max(1, Math.round(h / f));
+  const small = new Float32Array(sw * sh);
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) {
+      let s = 0;
+      const x0 = x * f, y0 = y * f;
+      for (let dy = 0; dy < f; dy++) {
+        for (let dx = 0; dx < f; dx++) {
+          const xx = Math.min(w - 1, x0 + dx);
+          const yy = Math.min(h - 1, y0 + dy);
+          s += gray[yy * w + xx];
+        }
+      }
+      small[y * sw + x] = s / (f * f);
+    }
+  }
+  const L = gaussianBlur(small, sw, sh); // 进一步平滑出低频光照
+  // 双线性放大回原尺寸，并做 gray / L 归一化
+  let mean = 0;
+  for (let p = 0; p < w * h; p++) mean += gray[p];
+  mean /= w * h;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const gx = (x / f) * (sw - 1);
+      const fx0 = gx - Math.floor(gx);
+      const fy0 = y / f - Math.floor(y / f);
+      const ix0 = Math.min(sw - 1, Math.floor(gx));
+      const iy0 = Math.min(sh - 1, Math.floor(y / f));
+      const ix1 = Math.min(sw - 1, ix0 + 1);
+      const iy1 = Math.min(sh - 1, iy0 + 1);
+      const l00 = L[iy0 * sw + ix0];
+      const l10 = L[iy0 * sw + ix1];
+      const l01 = L[iy1 * sw + ix0];
+      const l11 = L[iy1 * sw + ix1];
+      const lt = l00 + (l10 - l00) * fx0;
+      const lb = l01 + (l11 - l01) * fx0;
+      const lval = lt + (lb - lt) * fy0;
+      const p = y * w + x;
+      let v = (gray[p] / (lval + 1)) * mean; // 消除光照乘性分量
+      if (v < 0) v = 0;
+      else if (v > 255) v = 255;
+      gray[p] = v;
+    }
+  }
+}
+
+// Sauvola 自适应二值化（基于积分图，O(n)）。返回 Uint8Array：1=文字(暗)
+function sauovolaBinarize(gray, w, h, winR, k, R) {
+  const sum = new Float64Array((w + 1) * (h + 1));
+  const sumSq = new Float64Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) {
+    let rs = 0, rs2 = 0;
+    for (let x = 0; x < w; x++) {
+      const v = gray[y * w + x];
+      rs += v;
+      rs2 += v * v;
+      sum[(y + 1) * (w + 1) + (x + 1)] = sum[y * (w + 1) + (x + 1)] + rs;
+      sumSq[(y + 1) * (w + 1) + (x + 1)] = sumSq[y * (w + 1) + (x + 1)] + rs2;
+    }
+  }
+  const at = (arr, x, y) => arr[y * (w + 1) + x];
+  const bin = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    const y0 = Math.max(0, y - winR), y1 = Math.min(h - 1, y + winR);
+    for (let x = 0; x < w; x++) {
+      const x0 = Math.max(0, x - winR), x1 = Math.min(w - 1, x + winR);
+      const area = (x1 - x0 + 1) * (y1 - y0 + 1);
+      const s = at(sum, x1 + 1, y1 + 1) - at(sum, x0, y1 + 1) - at(sum, x1 + 1, y0) + at(sum, x0, y0);
+      const s2 = at(sumSq, x1 + 1, y1 + 1) - at(sumSq, x0, y1 + 1) - at(sumSq, x1 + 1, y0) + at(sumSq, x0, y0);
+      const mean = s / area;
+      const variance = s2 / area - mean * mean;
+      const std = Math.sqrt(variance > 0 ? variance : 0);
+      const T = mean * (1 + k * (std / R - 1));
+      bin[y * w + x] = gray[y * w + x] < T ? 1 : 0;
+    }
+  }
+  return bin;
+}
+
+// 3x3 可分离高斯模糊（用于去噪 / 光照估计）
 function gaussianBlur(src, w, h) {
   const k = [1, 2, 1, 2, 4, 2, 1, 2, 1];
   const ksum = 16;
@@ -173,38 +490,6 @@ function gaussianBlur(src, w, h) {
     }
   }
   return out;
-}
-
-// Otsu 最大类间方差法求二值化阈值
-function otsuThreshold(gray, n) {
-  const hist = new Array(256).fill(0);
-  for (let i = 0; i < n; i++) {
-    let v = gray[i] | 0;
-    if (v < 0) v = 0;
-    else if (v > 255) v = 255;
-    hist[v]++;
-  }
-  let sum = 0;
-  for (let t = 0; t < 256; t++) sum += t * hist[t];
-  let sumB = 0;
-  let wB = 0;
-  let maxVar = 0;
-  let threshold = 0;
-  for (let t = 0; t < 256; t++) {
-    wB += hist[t];
-    if (wB === 0) continue;
-    const wF = n - wB;
-    if (wF === 0) break;
-    sumB += t * hist[t];
-    const mB = sumB / wB;
-    const mF = (sum - sumB) / wF;
-    const between = wB * wF * (mB - mF) * (mB - mF);
-    if (between > maxVar) {
-      maxVar = between;
-      threshold = t;
-    }
-  }
-  return threshold;
 }
 
 // 二值图像膨胀（radius=1），连接笔画断裂
@@ -379,7 +664,7 @@ async function recognizeImage(source, retryCount = 0) {
   DOM.progressWrap.hidden = false;
   DOM.progressBar.style.width = '0%';
   setStatus('正在识别', 'busy');
-  updateStage(1, '预处理图片（去噪 / 二值化）', 6);
+  updateStage(1, '预处理图片（透视矫正 / 去阴影 / 二值化）', 6);
 
   try {
     // 预处理图片以提高 OCR 准确率（灰度→去噪→二值化→断笔修复）
