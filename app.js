@@ -36,6 +36,8 @@ let speakQueue = [];        // 长文本分块队列
 let currentChunkIndex = 0;
 let toastTimer = null;
 let voiceCache = null;      // 缓存匹配到的语音
+let ocrReady = false;       // 识别引擎是否已加载就绪（用于提示首次下载）
+let warmupToastShown = false; // 预热成功提示是否已弹出（仅一次）
 
 // ---- Toast ----
 function toast(message, duration = 3000) {
@@ -49,6 +51,16 @@ function toast(message, duration = 3000) {
 function setStatus(text, type = '') {
   DOM.statusBadge.textContent = text;
   DOM.statusBadge.className = `badge ${type}`.trim();
+}
+
+// ---- 识别进度阶段提示（步骤 N/3 + 进度条映射到合理区间） ----
+function updateStage(stage, text, barPct) {
+  DOM.progressText.textContent = `步骤 ${stage}/3 · ${text}`;
+  if (typeof barPct === 'number') {
+    const pct = Math.min(100, Math.round(barPct));
+    DOM.progressBar.style.width = `${pct}%`;
+    DOM.progressWrap.setAttribute('aria-valuenow', pct);
+  }
 }
 
 // ---- 朗读按钮状态 ----
@@ -238,6 +250,7 @@ function createOcrWorker() {
       // 之前把 2 万+ 汉字全塞进白名单，导致每个字符都要与整个名单打分，
       // 是「识别几分钟无结果」的首要原因。中文之外的字符已由 filterChineseOnly 过滤。
     });
+    ocrReady = true; // 标记引擎已就绪，后续识别不再提示「首次下载」
     return worker;
   })();
   return ocrWorkerPromise;
@@ -365,30 +378,48 @@ async function recognizeImage(source, retryCount = 0) {
   DOM.imageInput.disabled = true;
   DOM.progressWrap.hidden = false;
   DOM.progressBar.style.width = '0%';
-  DOM.progressText.textContent = '正在预处理图片…';
   setStatus('正在识别', 'busy');
+  updateStage(1, '预处理图片（去噪 / 二值化）', 6);
 
   try {
     // 预处理图片以提高 OCR 准确率（灰度→去噪→二值化→断笔修复）
     const processed = await preprocessImage(source);
-    DOM.progressText.textContent = '正在加载识别引擎…';
+    updateStage(
+      2,
+      '加载识别引擎' + (ocrReady ? '' : '（首次需下载中文语言包，请稍候）'),
+      18
+    );
 
-    // 进度回调（复用缓存 worker）
+    // 进度回调【必须在 createOcrWorker 之前赋值】，否则语言包下载阶段的
+    // 进度会整段丢失，用户看到「一直没动静」正是这个原因。
     ocrProgressCb = (message) => {
-      const statusMap = {
-        'loading tesseract core': '正在加载 Tesseract 核心…',
-        'initializing tesseract': '正在初始化…',
-        'loading language traineddata': '正在加载中文语言包…',
-        'initializing api': '正在初始化 API…',
-        'recognizing text': `正在识别中文 ${Math.round((message.progress || 0) * 100)}%`,
-      };
-      DOM.progressText.textContent = statusMap[message.status] || `正在处理: ${message.status}`;
-      if (message.status === 'recognizing text') {
-        DOM.progressBar.style.width = `${Math.round((message.progress || 0) * 100)}%`;
+      const p = message.progress || 0;
+      switch (message.status) {
+        case 'loading tesseract core':
+        case 'initializing tesseract':
+          updateStage(2, '加载识别核心…', 22);
+          break;
+        case 'loading language traineddata':
+          // 下载语言包：进度映射到 22% → 45%
+          updateStage(
+            2,
+            '下载中文语言包 ' + Math.round(p * 100) + '%（首次较慢，已缓存后秒开）',
+            22 + p * 23
+          );
+          break;
+        case 'initializing api':
+          updateStage(2, '初始化识别引擎…', 46);
+          break;
+        case 'recognizing text':
+          // 识别阶段：进度映射到 48% → 100%
+          updateStage(3, '正在识别中文 ' + Math.round(p * 100) + '%', 48 + p * 52);
+          break;
+        default:
+          DOM.progressText.textContent = '正在处理: ' + message.status;
       }
     };
 
-    // 使用预加载 worker（含中文白名单 + 自动分页），提升准确率与速度
+    // 复用预加载 worker（PSM=6，无超大白名单），提升速度
     let worker;
     try {
       worker = await createOcrWorker();
@@ -658,7 +689,14 @@ if ('serviceWorker' in navigator) {
 function warmUpOcr() {
   if (!window.Tesseract || !navigator.onLine) return;
   createOcrWorker()
-    .then(() => console.log('OCR 引擎已预热'))
+    .then(() => {
+      console.log('OCR 引擎已预热');
+      // 仅首次预热成功后提示一次，告知用户已可快速识别
+      if (!warmupToastShown) {
+        warmupToastShown = true;
+        toast('识别引擎已就绪，可快速识别');
+      }
+    })
     .catch(() => { ocrWorkerPromise = null; }); // 失败不阻塞，下次识别再试
 }
 window.addEventListener('load', () => {
