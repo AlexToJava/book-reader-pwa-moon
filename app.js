@@ -70,11 +70,12 @@ function preprocessImage(source) {
         let w = img.width;
         let h = img.height;
 
-        // 小图放大（Tesseract 需要足够 DPI），超大图限制上限避免卡死
+        // 限制尺寸：OCR 在 1600px 级别已足够识别书页，过大只会拖慢速度
+        // 小图适度放大到 1200，保证小字号也有足够 DPI
         let scale = 1;
         const minDim = Math.min(w, h);
-        if (minDim < 1100) scale = Math.min(2.2, 1300 / minDim);
-        const maxDim = 3600;
+        if (minDim < 900) scale = Math.min(2.0, 1200 / minDim);
+        const maxDim = 1600;
         if (Math.max(w, h) * scale > maxDim) {
           scale *= maxDim / (Math.max(w, h) * scale);
         }
@@ -216,24 +217,6 @@ function dilate(bin, w, h, r) {
   }
 }
 
-// 中文白名单：限制 Tesseract 只输出 CJK 汉字 + 中文标点，
-// 从根本上避免把汉字误认成字母/数字/符号（准确率关键）
-let _cnWhitelist = null;
-function getChineseWhitelist() {
-  if (_cnWhitelist) return _cnWhitelist;
-  let s = '';
-  const add = (a, b) => {
-    for (let c = a; c <= b; c++) s += String.fromCharCode(c);
-  };
-  add(0x4e00, 0x9fff); // CJK 统一汉字（约 2 万常用字）
-  add(0x3400, 0x4dbf); // 扩展 A（生僻字）
-  add(0x3000, 0x303f); // CJK 标点（含 。“”‘’（）《》【】「」『』… 等）
-  // 额外补全常用中文/全角标点（避免引号转义问题，仅用非 ASCII 引号字符）
-  s += '。！？、；：，（）《》【】〈〉「」『』…—·～';
-  _cnWhitelist = s;
-  return s;
-}
-
 // 复用的识别 Worker（首次加载后缓存，加快后续识别）
 let ocrWorkerPromise = null;
 let ocrProgressCb = null;
@@ -247,9 +230,13 @@ function createOcrWorker() {
       },
     });
     await worker.setParameters({
-      tessedit_pageseg_mode: '3', // 自动页面分割（适合书页）
+      // PSM=6：假设整页是统一的文字块，跳过方向/语言检测，速度快很多；
+      // 书页文字整齐，6 比 3（带 OSD）更合适也更快
+      tessedit_pageseg_mode: '6',
       preserve_interword_spaces: '1',
-      tessedit_char_whitelist: getChineseWhitelist(),
+      // 注意：不设置 tessedit_char_whitelist。
+      // 之前把 2 万+ 汉字全塞进白名单，导致每个字符都要与整个名单打分，
+      // 是「识别几分钟无结果」的首要原因。中文之外的字符已由 filterChineseOnly 过滤。
     });
     return worker;
   })();
@@ -664,6 +651,20 @@ if ('serviceWorker' in navigator) {
       .catch((err) => console.warn('SW 注册失败:', err))
   );
 }
+
+// ---- 空闲时预热识别引擎 ----
+// 提前把中文语言包下载并缓存（Service Worker 会缓存 OCR 数据），
+// 这样用户真正拍照时无需等待下载，识别几乎立即可开始。
+function warmUpOcr() {
+  if (!window.Tesseract || !navigator.onLine) return;
+  createOcrWorker()
+    .then(() => console.log('OCR 引擎已预热'))
+    .catch(() => { ocrWorkerPromise = null; }); // 失败不阻塞，下次识别再试
+}
+window.addEventListener('load', () => {
+  const idle = window.requestIdleCallback || ((cb) => setTimeout(cb, 2000));
+  idle(warmUpOcr);
+});
 
 // 监听在线/离线状态
 window.addEventListener('online', () => {
