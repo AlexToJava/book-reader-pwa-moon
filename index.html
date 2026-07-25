@@ -2,93 +2,117 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#111827" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#111827" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="apple-mobile-web-app-title" content="拍书朗读" />
+  <meta name="description" content="拍摄书本页面，识别文字并自动朗读 - PWA" />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="apple-touch-icon" href="icon.svg" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
   <link rel="stylesheet" href="styles.css" />
   <title>拍书朗读</title>
 </head>
 <body>
+  <!-- 离线横幅 -->
+  <div id="offlineBanner" class="offline-banner" role="alert" hidden>
+    您已离线 - 部分功能可能受限
+  </div>
+
+  <!-- Toast 通知 -->
+  <div id="toast" class="toast" role="status" aria-live="polite">
+    <span id="toastMsg"></span>
+  </div>
+
   <main class="app-shell">
     <header class="topbar">
       <div>
         <p class="eyebrow">iPhone H5 / PWA</p>
         <h1>拍书朗读</h1>
       </div>
-      <span id="statusBadge" class="badge">未启动</span>
+      <span id="statusBadge" class="badge" role="status" aria-live="polite">未启动</span>
     </header>
 
-    <section class="camera-card">
+    <section class="camera-card" aria-label="相机区域">
       <div class="camera-frame">
-        <video id="camera" playsinline muted></video>
+        <video id="camera" playsinline muted aria-label="摄像头预览"></video>
         <canvas id="captureCanvas" hidden></canvas>
         <div class="scan-guide" aria-hidden="true"></div>
-        <p id="cameraHint" class="camera-hint">点击“打开摄像头”，将书页放入框内</p>
+        <p id="cameraHint" class="camera-hint">点击"打开摄像头"，将书页放入框内</p>
       </div>
 
       <div class="controls primary-controls">
-        <button id="openCameraBtn" class="btn btn-primary">打开摄像头</button>
-        <button id="captureBtn" class="btn" disabled>拍照识别并朗读</button>
+        <button id="openCameraBtn" class="btn btn-primary" aria-label="打开摄像头">
+          打开摄像头
+        </button>
+        <button id="captureBtn" class="btn" disabled aria-label="拍照识别并朗读">
+          拍照识别并朗读
+        </button>
       </div>
 
-      <label class="upload-label">
+      <label class="upload-label" id="uploadLabel" aria-label="从相册选择图片">
         或从相册选择图片
         <input id="imageInput" type="file" accept="image/*" capture="environment" />
       </label>
     </section>
 
-    <section class="panel">
+    <section class="panel" aria-label="识别结果">
       <div class="panel-title-row">
         <h2>识别结果</h2>
-        <button id="clearBtn" class="text-btn">清空</button>
+        <button id="clearBtn" class="text-btn" aria-label="清空识别结果">清空</button>
       </div>
-      <textarea id="recognizedText" placeholder="识别出来的文字会显示在这里，也可以手动修改。"></textarea>
-      <div id="progressWrap" class="progress-wrap" hidden>
+      <textarea
+        id="recognizedText"
+        placeholder="识别出来的文字会显示在这里，也可以手动修改。"
+        aria-label="识别文字编辑区"
+      ></textarea>
+      <div id="progressWrap" class="progress-wrap" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
         <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
         <span id="progressText">正在识别 0%</span>
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel" aria-label="朗读控制">
       <h2>朗读控制</h2>
       <div class="controls">
-        <button id="speakBtn" class="btn btn-primary" disabled>开始朗读</button>
-        <button id="pauseBtn" class="btn" disabled>暂停</button>
-        <button id="resumeBtn" class="btn" disabled>继续</button>
-        <button id="stopBtn" class="btn" disabled>停止</button>
+        <button id="speakBtn" class="btn btn-primary" disabled aria-label="开始朗读">开始朗读</button>
+        <button id="pauseBtn" class="btn" disabled aria-label="暂停朗读">暂停</button>
+        <button id="resumeBtn" class="btn" disabled aria-label="继续朗读">继续</button>
+        <button id="stopBtn" class="btn" disabled aria-label="停止朗读">停止</button>
       </div>
 
       <div class="settings-grid">
         <label>
-          语速 <span id="rateValue">1.0</span>
-          <input id="rateInput" type="range" min="0.6" max="1.6" step="0.1" value="1.0" />
+          语速 <span id="rateValue" aria-live="polite">1.0</span>
+          <input id="rateInput" type="range" min="0.6" max="1.6" step="0.1" value="1.0" aria-label="语速调节" />
         </label>
         <label>
-          语言
-          <select id="languageSelect">
-            <option value="chi_sim">简体中文</option>
-            <option value="eng">英文</option>
+          识别语言
+          <select id="languageSelect" aria-label="识别语言选择" disabled>
+            <option value="chi_sim" selected>仅中文汉字</option>
           </select>
         </label>
       </div>
 
       <label class="switch-row">
-        <input id="autoSpeakToggle" type="checkbox" checked />
+        <input id="autoSpeakToggle" type="checkbox" checked aria-label="识别完成后自动朗读" />
         <span>识别完成后自动朗读</span>
       </label>
     </section>
 
-    <section class="tips">
+    <section class="tips" aria-label="拍摄建议">
       <h2>拍摄建议</h2>
-      <p>保持书页平整、光线均匀、镜头与书页平行。首次识别需要加载文字识别组件，速度会稍慢。</p>
+      <p>保持书页平整、光线均匀、镜头与书页平行。仅识别中文汉字，字母、数字及英文符号将自动过滤。首次识别需要加载文字识别组件，速度会稍慢。</p>
     </section>
   </main>
 
-  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <!-- Tesseract.js CDN 主源 + 回退 -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"
+          onerror="this.onerror=null;this.src='https://unpkg.com/tesseract.js@5/dist/tesseract.min.js'"></script>
   <script src="app.js"></script>
 </body>
 </html>

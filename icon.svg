@@ -1,7 +1,35 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#111827"/>
-  <path d="M112 126c48-18 99-11 144 22 45-33 96-40 144-22v250c-48-18-99-11-144 22-45-33-96-40-144-22V126Z" fill="#fff"/>
-  <path d="M256 148v250" stroke="#c7d2fe" stroke-width="18"/>
-  <path d="M152 190h64M152 238h64M296 190h64M296 238h64" stroke="#6366f1" stroke-width="18" stroke-linecap="round"/>
-  <path d="M160 309c30 0 49 12 63 31M352 309c-30 0-49 12-63 31" fill="none" stroke="#111827" stroke-width="18" stroke-linecap="round"/>
+  <!-- Background -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="pages" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#e0e7ff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+
+  <!-- Book / pages -->
+  <path d="M112 126c48-18 99-11 144 22 45-33 96-40 144-22v250c-48-18-99-11-144 22-45-33-96-40-144-22V126Z" fill="url(#pages)" opacity="0.95"/>
+
+  <!-- Spine -->
+  <line x1="256" y1="148" x2="256" y2="398" stroke="#818cf8" stroke-width="14" stroke-linecap="round"/>
+
+  <!-- Text lines left -->
+  <line x1="152" y1="190" x2="216" y2="190" stroke="#6366f1" stroke-width="16" stroke-linecap="round"/>
+  <line x1="152" y1="240" x2="216" y2="240" stroke="#6366f1" stroke-width="16" stroke-linecap="round"/>
+  <line x1="152" y1="290" x2="196" y2="290" stroke="#6366f1" stroke-width="16" stroke-linecap="round"/>
+
+  <!-- Text lines right -->
+  <line x1="296" y1="190" x2="360" y2="190" stroke="#6366f1" stroke-width="16" stroke-linecap="round"/>
+  <line x1="296" y1="240" x2="360" y2="240" stroke="#6366f1" stroke-width="16" stroke-linecap="round"/>
+  <line x1="296" y1="290" x2="340" y2="290" stroke="#6366f1" stroke-width="16" stroke-linecap="round"/>
+
+  <!-- Sound wave / 朗读标记 -->
+  <path d="M175 355c35 0 55 15 72 38M337 355c-35 0-55 15-72 38" fill="none" stroke="#a5b4fc" stroke-width="14" stroke-linecap="round"/>
+  <path d="M155 380c55 0 85 20 110 50M357 380c-55 0-85 20-110 50" fill="none" stroke="#c7d2fe" stroke-width="10" stroke-linecap="round" opacity="0.5"/>
 </svg>
