@@ -60,40 +60,200 @@ function updateSpeechButtons() {
   DOM.stopBtn.disabled = !speechSynthesis.speaking && !speechSynthesis.paused;
 }
 
-// ---- 图片预处理（增强对比度，提升 OCR 准确率）----
+// ---- 图片预处理：灰度 → 高斯去噪 → Otsu 二值化 → 断笔修复 ----
+// 这套管线对笔画密集的中文识别率提升明显
 function preprocessImage(source) {
-  const img = new Image();
   return new Promise((resolve, reject) => {
+    const img = new Image();
     img.onload = () => {
-      DOM.canvas.width = img.width;
-      DOM.canvas.height = img.height;
-      const ctx = DOM.canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0);
+      try {
+        let w = img.width;
+        let h = img.height;
 
-      const imageData = ctx.getImageData(0, 0, DOM.canvas.width, DOM.canvas.height);
-      const data = imageData.data;
+        // 小图放大（Tesseract 需要足够 DPI），超大图限制上限避免卡死
+        let scale = 1;
+        const minDim = Math.min(w, h);
+        if (minDim < 1100) scale = Math.min(2.2, 1300 / minDim);
+        const maxDim = 3600;
+        if (Math.max(w, h) * scale > maxDim) {
+          scale *= maxDim / (Math.max(w, h) * scale);
+        }
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
 
-      // 转灰度 + 对比度增强
-      for (let i = 0; i < data.length; i += 4) {
-        const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-        // 对比度拉伸
-        const enhanced = Math.min(255, Math.max(0, (gray - 40) * 1.4));
-        data[i] = data[i + 1] = data[i + 2] = enhanced;
+        DOM.canvas.width = w;
+        DOM.canvas.height = h;
+        const ctx = DOM.canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0, w, h);
+
+        const imageData = ctx.getImageData(0, 0, w, h);
+        const data = imageData.data;
+        const n = w * h;
+
+        // 1) 转灰度
+        const gray = new Float32Array(n);
+        for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+          gray[p] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        }
+
+        // 2) 高斯模糊去噪（让文字边缘干净）
+        const blurred = gaussianBlur(gray, w, h);
+
+        // 3) Otsu 自动阈值二值化
+        const t = otsuThreshold(blurred, n);
+
+        // 4) 二值化 + 轻微膨胀，连接断笔
+        const bin = new Uint8Array(n);
+        for (let p = 0; p < n; p++) bin[p] = blurred[p] > t ? 1 : 0;
+        dilate(bin, w, h, 1);
+
+        // 写回：黑字白底（Tesseract 偏好）
+        for (let p = 0; p < n; p++) {
+          const v = bin[p] ? 0 : 255;
+          data[p * 4] = data[p * 4 + 1] = data[p * 4 + 2] = v;
+          data[p * 4 + 3] = 255;
+        }
+        ctx.putImageData(imageData, 0, 0);
+        resolve(DOM.canvas);
+      } catch (err) {
+        reject(err);
       }
-      ctx.putImageData(imageData, 0, 0);
-      resolve(DOM.canvas);
     };
     img.onerror = reject;
 
     if (source instanceof HTMLCanvasElement) {
-      // Canvas 直接转为 DataURL
-      img.src = source.toDataURL('image/jpeg', 0.9);
+      img.src = source.toDataURL('image/jpeg', 0.92);
     } else if (source instanceof File || source instanceof Blob) {
       img.src = URL.createObjectURL(source);
     } else {
       resolve(source); // fallback
     }
   });
+}
+
+// 3x3 可分离高斯模糊（用于去噪）
+function gaussianBlur(src, w, h) {
+  const k = [1, 2, 1, 2, 4, 2, 1, 2, 1];
+  const ksum = 16;
+  const tmp = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let dx = -1; dx <= 1; dx++) {
+        const xx = x + dx;
+        if (xx < 0 || xx >= w) continue;
+        acc += src[y * w + xx] * k[dx + 1 + 3];
+      }
+      tmp[y * w + x] = acc / ksum;
+    }
+  }
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        acc += tmp[yy * w + x] * k[1 + (dy + 1) * 3];
+      }
+      out[y * w + x] = acc / ksum;
+    }
+  }
+  return out;
+}
+
+// Otsu 最大类间方差法求二值化阈值
+function otsuThreshold(gray, n) {
+  const hist = new Array(256).fill(0);
+  for (let i = 0; i < n; i++) {
+    let v = gray[i] | 0;
+    if (v < 0) v = 0;
+    else if (v > 255) v = 255;
+    hist[v]++;
+  }
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * hist[t];
+  let sumB = 0;
+  let wB = 0;
+  let maxVar = 0;
+  let threshold = 0;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t];
+    if (wB === 0) continue;
+    const wF = n - wB;
+    if (wF === 0) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB;
+    const mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) * (mB - mF);
+    if (between > maxVar) {
+      maxVar = between;
+      threshold = t;
+    }
+  }
+  return threshold;
+}
+
+// 二值图像膨胀（radius=1），连接笔画断裂
+function dilate(bin, w, h, r) {
+  const copy = bin.slice();
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let val = 0;
+      for (let dy = -r; dy <= r && !val; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const xx = x + dx;
+          const yy = y + dy;
+          if (xx < 0 || xx >= w || yy < 0 || yy >= h) continue;
+          if (copy[yy * w + xx]) {
+            val = 1;
+            break;
+          }
+        }
+      }
+      bin[y * w + x] = val;
+    }
+  }
+}
+
+// 中文白名单：限制 Tesseract 只输出 CJK 汉字 + 中文标点，
+// 从根本上避免把汉字误认成字母/数字/符号（准确率关键）
+let _cnWhitelist = null;
+function getChineseWhitelist() {
+  if (_cnWhitelist) return _cnWhitelist;
+  let s = '';
+  const add = (a, b) => {
+    for (let c = a; c <= b; c++) s += String.fromCharCode(c);
+  };
+  add(0x4e00, 0x9fff); // CJK 统一汉字（约 2 万常用字）
+  add(0x3400, 0x4dbf); // 扩展 A（生僻字）
+  add(0x3000, 0x303f); // CJK 标点（含 。“”‘’（）《》【】「」『』… 等）
+  // 额外补全常用中文/全角标点（避免引号转义问题，仅用非 ASCII 引号字符）
+  s += '。！？、；：，（）《》【】〈〉「」『』…—·～';
+  _cnWhitelist = s;
+  return s;
+}
+
+// 复用的识别 Worker（首次加载后缓存，加快后续识别）
+let ocrWorkerPromise = null;
+let ocrProgressCb = null;
+
+function createOcrWorker() {
+  if (ocrWorkerPromise) return ocrWorkerPromise;
+  ocrWorkerPromise = (async () => {
+    const worker = await Tesseract.createWorker('chi_sim', 1, {
+      logger: (m) => {
+        if (ocrProgressCb) ocrProgressCb(m);
+      },
+    });
+    await worker.setParameters({
+      tessedit_pageseg_mode: '3', // 自动页面分割（适合书页）
+      preserve_interword_spaces: '1',
+      tessedit_char_whitelist: getChineseWhitelist(),
+    });
+    return worker;
+  })();
+  return ocrWorkerPromise;
 }
 
 // ---- 摄像头 ----
@@ -222,26 +382,34 @@ async function recognizeImage(source, retryCount = 0) {
   setStatus('正在识别', 'busy');
 
   try {
-    // 预处理图片以提高 OCR 准确率
+    // 预处理图片以提高 OCR 准确率（灰度→去噪→二值化→断笔修复）
     const processed = await preprocessImage(source);
-    DOM.progressText.textContent = '正在加载识别组件…';
+    DOM.progressText.textContent = '正在加载识别引擎…';
 
-    // 强制只使用简体中文引擎
-    const result = await Tesseract.recognize(processed, 'chi_sim', {
-      logger(message) {
-        const statusMap = {
-          'loading tesseract core': '正在加载 Tesseract 核心…',
-          'initializing tesseract': '正在初始化…',
-          'loading language traineddata': '正在加载中文语言包…',
-          'initializing api': '正在初始化 API…',
-          'recognizing text': `正在识别中文 ${Math.round((message.progress || 0) * 100)}%`,
-        };
-        DOM.progressText.textContent = statusMap[message.status] || `正在处理: ${message.status}`;
-        if (message.status === 'recognizing text') {
-          DOM.progressBar.style.width = `${Math.round((message.progress || 0) * 100)}%`;
-        }
-      },
-    });
+    // 进度回调（复用缓存 worker）
+    ocrProgressCb = (message) => {
+      const statusMap = {
+        'loading tesseract core': '正在加载 Tesseract 核心…',
+        'initializing tesseract': '正在初始化…',
+        'loading language traineddata': '正在加载中文语言包…',
+        'initializing api': '正在初始化 API…',
+        'recognizing text': `正在识别中文 ${Math.round((message.progress || 0) * 100)}%`,
+      };
+      DOM.progressText.textContent = statusMap[message.status] || `正在处理: ${message.status}`;
+      if (message.status === 'recognizing text') {
+        DOM.progressBar.style.width = `${Math.round((message.progress || 0) * 100)}%`;
+      }
+    };
+
+    // 使用预加载 worker（含中文白名单 + 自动分页），提升准确率与速度
+    let worker;
+    try {
+      worker = await createOcrWorker();
+    } catch (e) {
+      ocrWorkerPromise = null; // 重建
+      worker = await createOcrWorker();
+    }
+    const result = await worker.recognize(processed);
 
     // 原始识别文本 → 过滤为纯中文
     const rawText = result.data.text || '';
